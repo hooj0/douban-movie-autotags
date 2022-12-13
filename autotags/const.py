@@ -55,7 +55,8 @@ _.USER_DATA_DIR = ".user-cache"
 _.BROWSER_BACKGROUND = False
 _.TIMEOUT = 600
 
-_.USER = "hoojo"
 _.TAGS = "N"
+_.USER = "hoojo"
+_.VIEWED = False
 
 _.to_string()
