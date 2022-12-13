@@ -67,7 +67,7 @@ class Core:
                 return tag.replace(prefix, '')
         return None
 
-    def __parse_tag(self, text_list, prefix, index):
+    def __parse_tag(self, text_list, prefix, index=None):
         text = self.__find_tag(text_list, prefix)
 
         if text is None:
@@ -75,7 +75,11 @@ class Core:
             return None
 
         if text.count("/") > 0:
-            return text.split("/")[index].strip()
+            tags = text.replace(" ", "").split("/")
+            if index is not None:
+                return tags[index]
+            else:
+                return " ".join(tags)
         else:
             return text.strip()
 
@@ -84,46 +88,111 @@ class Core:
         info_contents = (await info_el.inner_text()).split("\n")
 
         tags_name = const.TAGS
-        category = self.__parse_tag(info_contents, "类型: ", 1)
-        country = self.__parse_tag(info_contents, "制片国家/地区: ", 0)
-        tag_text = tags_name + " " + category + " " + country
-        self.log.debug("movie detail: ", info_contents)
-        self.log.debug("movie type: ", category)
-        self.log.debug("movie country: ", country)
-        self.log.debug("movie tag: ", tag_text)
+        category = self.__parse_tag(info_contents, "类型: ")
+        country = self.__parse_tag(info_contents, "制片国家/地区: ", index=0)
+        tag_text = tags_name + " " + country + " " + category
 
-        await page.locator("div.article a:has-text('修改')").click()
-        await page.wait_for_selector("div#dialog")
+        mark_tag_el = page.locator("div#interest_sect_level")
+        source_type = await mark_tag_el.inner_text()
+        if source_type.count("电视剧") != 0:
+            tag_text = tag_text + " 电视剧"
+        self.log.debug("movie detail:", info_contents)
+        self.log.debug("movie type:", category)
+        self.log.debug("movie country:", country)
+        self.log.debug("movie tag:", tag_text)
+
+        await mark_tag_el.locator("a:has-text('修改')").click()
+        try:
+            await page.wait_for_selector("div#dialog input[name=tags]")
+        except TimeoutError as e:
+            self.log.error("open dialog timeout, reopening dialog")
+            await page.screenshot()
+            await mark_tag_el.locator("a:has-text('修改')").click()
+            await page.wait_for_selector("div#dialog input[name=tags]")
+
+        self.log.info("open dialog success")
 
         dialog_el = page.locator("div#dialog")
         await dialog_el.locator("input[name=tags]").fill(tag_text)
-
         await dialog_el.locator("input:has-text('保存') >> visible=true").click()
-        await page.wait_for_selector("div#dialog", timeout=0, state="visible")
+        await page.wait_for_selector("div#submits", timeout=0, state="detached")
+        self.log.info("save tag success\n")
 
         # await asyncio.sleep(random.randrange(1, 3))
 
     async def __open_movie(self, page, movie_el):
-        tags_name = const.TAGS
-        tagged_count = await movie_el.locator("span.tags:text('%s')" % tags_name).count()
-        print("tagged: %s" % tagged_count)
-        title = await movie_el.locator("li.title a").inner_text()
+        movie_name = await movie_el.locator("li.title a em").inner_text()
+        tagged_count = await movie_el.locator("span.tags:text('%s')" % const.TAGS).count()
         if tagged_count != 1:
-            self.log.debug("open movie:", title)
-            # await asyncio.sleep(random.randrange(1, 3))
+            self.log.info("open movie: %s" % movie_name)
 
             await movie_el.locator("li.title a").click()
-            await page.wait_for_selector("div#info", timeout=0)
+            await page.wait_for_load_state(state="domcontentloaded")
+
+            title = await page.title()
+            if title == "页面不存在":
+                self.log.error("movie detail is not exist\n")
+                await page.go_back()
+                return None
+
+            try:
+                await page.wait_for_selector("div#info")
+            except TimeoutError as e:
+                self.log.error("open movie timeout, reload page")
+                await page.screenshot()
+                await page.reload()
+                await page.wait_for_selector("div#info")
+
             self.log.debug("movie detail load success")
 
             await self.__changed_tag(page)
-            await page.go_back()
+            try:
+                await page.go_back()
+            except:
+                self.log.error("go back error", sys.exc_info()[0])
+                await page.screenshot()
+                await page.go_back()
         else:
-            self.log.debug("tagged movie:", title)
+            self.log.debug("tagged movie:", movie_name)
 
     async def __movie_list(self, page):
+        await page.wait_for_load_state()
+        await page.wait_for_selector("div.article", timeout=0)
+        self.log.debug("movie list load success\n")
+
+        paginator_el = page.locator("div.article div.paginator")
+        page_current = await paginator_el.locator("span.thispage").inner_text()
+        page_total = await paginator_el.locator("span.thispage").get_attribute("data-total-page")
+        self.log.info("current page: %s, total page: %s" % (page_current, page_total))
+
+        tags_name = const.TAGS
+        tagged_el = page.locator("div.grid-view div.item", has=page.locator("span.tags:text('%s')" % tags_name))
+        tagged_el_count = await tagged_el.count()
+        if tagged_el_count >= 15:
+            self.log.warn("already mark tag count：%s" % tagged_el_count)
+        else:
+            self.log.debug("wait for the tags to be added count：%s" % tagged_el_count)
+
+        movie_els = page.locator("div.grid-view div.item")
+        movie_els_count = await movie_els.count()
+        self.log.debug("found movies count: %d" % movie_els_count)
+
+        for i in range(movie_els_count):
+            movie_el = movie_els.nth(i)
+
+            await self.__open_movie(page, movie_el)
+
+        if page_current == page_total:
+            exit("Mark tag complete.")
+        else:
+            self.log.warn("next page")
+            await paginator_el.locator("span.next a").click()
+            await self.__movie_list(page)
+
+    async def __open_page(self, page):
+        category = "wish" if not const.VIEWED else "collect"
         # 设置请求URL
-        url = f"https://movie.douban.com/people/{const.USER}/wish"
+        url = f"https://movie.douban.com/people/{const.USER}/{category}"
 
         # 地址栏跳转到当前网址
         response = await page.goto(url, timeout=0)
@@ -131,27 +200,7 @@ class Core:
         self.log.debug("response url:", response.url)
         self.log.info("open page: %s, ok: %s" % (await page.title(), response.ok))
 
-        await page.wait_for_selector("div.article", timeout=0)
-        await page.wait_for_load_state()
-        self.log.debug("console load success")
-
-        tags_name = const.TAGS
-        tagged_el = page.locator("div.grid-view div.item", has=page.locator("span.tags:text('%s')" % tags_name))
-        tagged_el_count = await tagged_el.count()
-        if tagged_el_count >= 15:
-            self.log.error("No movies were found to be labeled `%s`." % tags_name)
-            exit("No movies were found to be labeled `%s`." % tags_name)
-        else:
-            self.log.info("Movies were found to be labeled `%s`." % tagged_el_count)
-
-        movie_els = page.locator("div.grid-view div.item")
-        movie_els_count = await movie_els.count()
-        print("Found movies count: %d" % movie_els_count)
-
-        for i in range(movie_els_count):
-            movie_el = movie_els.nth(i)
-
-            await self.__open_movie(page, movie_el)
+        await self.__movie_list(page)
 
     async def __run_browser(self):
         self.log.info("start the browser to run the script")
@@ -175,7 +224,7 @@ class Core:
             page.set_default_timeout(1000 * timeout)
 
             # 打开电影列表
-            await self.__movie_list(page)
+            await self.__open_page(page)
 
             # await asyncio.sleep(1000)
             # 关闭页面
